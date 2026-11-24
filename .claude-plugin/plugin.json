@@ -1,0 +1,29 @@
+{
+  "name": "cpa-band",
+  "version": "0.1.0",
+  "description": "Band above the prompt: CPA relay quota and usage, plus this session's tokens, cost, cache countdown and model",
+  "author": { "name": "Liumua" },
+  "repository": "https://github.com/Liumua/ClaudeCpaBand",
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "refreshSeconds": {
+      "type": "number",
+      "title": "CPA refresh interval (seconds)",
+      "description": "How often to query /v1/usage and /v1/quota. Too often returns HTTP 429.",
+      "default": 120
+    },
+    "cacheTtlMinutes": {
+      "type": "number",
+      "title": "Prompt cache TTL (minutes)",
+      "description": "How long the prompt cache lives: 60 as on a Claude subscription, 5 for the API default.",
+      "default": 60
+    },
+    "priceMultiplier": {
+      "type": "number",
+      "title": "Price multiplier",
+      "description": "Your provider's price as a fraction of Anthropic list price (1 = list price).",
+      "default": 1
+    }
+  }
+}

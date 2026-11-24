@@ -1,0 +1,5 @@
+{
+  "name": "ClaudeCpaBand",
+  "owner": { "name": "Liumua" },
+  "plugins": [{ "name": "cpa-band", "source": "./" }]
+}
