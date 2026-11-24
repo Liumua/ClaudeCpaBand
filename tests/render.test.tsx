@@ -138,10 +138,42 @@ for (const style of STYLES) {
   })
 }
 
-test('gauge: the desktop draws the rings as an Svg', async ($, on) => {
+test('gauge: the dashboard leads with stat tiles', async ($, on) => {
   seed(on, { style: 'gauge', placement: 'above' })
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...BAND, surface })
+    expect(await ui.find({ type: 'Text', text: '近 1 小时' })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: '账号额度' })).toBeTruthy()
+    await ui.unmount()
+  }
+})
+
+for (const bodyColumns of [40, 70, 140]) {
+  for (const style of STYLES) {
+    test(`${style}: draws at ${bodyColumns} columns`, async ($, on) => {
+      seed(on, { style, placement: 'pane' })
+      for (const surface of SURFACES) {
+        const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns }, surface })
+        expect(await ui.find({ type: 'Text', text: /A01/ })).toBeTruthy()
+        await ui.unmount()
+      }
+    })
+  }
+}
+
+test('a low window says so in words, not colour alone', async ($, on) => {
+  seed(on, { style: 'classic', placement: 'above' })
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  expect(await ui.find({ type: 'Svg' })).toBeTruthy()
+  // A02 is stale in the snapshot, so its windows read 旧值.
+  expect(await ui.find({ type: 'Text', text: '旧值' })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('the widget placement draws the glance form in a full pane too', async ($, on) => {
+  seed(on, { style: 'card', placement: 'widget' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Button', key: 'expand' })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', key: 'settings' })).toBeFalsy()
   await ui.unmount()
 })
 

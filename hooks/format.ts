@@ -1,11 +1,11 @@
-// Pure helpers: number formats, colours, the text forms and the gauge SVG.
+// Pure helpers: number formats, severity colours and the one-line text form.
 import type { CpaAccount, CpaSnapshot, CpaTotals, CpaWindow, Placement, Style } from '../types'
 
 export const STYLES: readonly { value: Style; label: string }[] = [
   { value: 'classic', label: '经典' },
   { value: 'compact', label: '紧凑' },
   { value: 'card', label: '卡片' },
-  { value: 'gauge', label: '仪表' },
+  { value: 'gauge', label: '仪表盘' },
 ]
 
 export const PLACEMENTS: readonly { value: Placement; label: string }[] = [
@@ -67,19 +67,29 @@ export function percent(remaining: number | null): string {
   return remaining === null ? '?' : `${remaining.toFixed(0)}%`
 }
 
-// Theme colour for a remaining share: green above half, amber above a fifth, red below.
-export function tone(remaining: number | null, isStale: boolean): string {
-  if (isStale || remaining === null) return 'inactive'
-  if (remaining > 50) return 'success'
-  if (remaining > 20) return 'warning'
-  return 'error'
+// How a remaining share reads: the meter's fill and track (status palette, fixed),
+// the terminal's theme colour, and the word that goes with it so colour never says it alone.
+export type Severity = { fill: string; track: string; term: string; tag: string | null }
+
+const GOOD = '#0ca30c'
+const WARNING = '#fab219'
+const SERIOUS = '#ec835a'
+const CRITICAL = '#d03b3b'
+const MUTED = '#8a8a85'
+
+function level(fill: string, term: string, tag: string | null): Severity {
+  // The track is a lighter step of the fill's own hue, so the state reads across the whole bar.
+  return { fill, track: `${fill}33`, term, tag }
 }
 
-const HEX: Record<string, string> = {
-  success: '#22c55e',
-  warning: '#f59e0b',
-  error: '#ef4444',
-  inactive: '#9ca3af',
+export function severity(remaining: number | null, isStale: boolean): Severity {
+  if (isStale) return level(MUTED, 'inactive', '旧值')
+  if (remaining === null) return level(MUTED, 'inactive', '未知')
+  if (remaining <= 0) return level(CRITICAL, 'error', '耗尽')
+  if (remaining < 5) return level(CRITICAL, 'error', '低')
+  if (remaining <= 20) return level(SERIOUS, 'error', '低')
+  if (remaining <= 50) return level(WARNING, 'warning', null)
+  return level(GOOD, 'success', null)
 }
 
 export function textBar(remaining: number | null, cells: number): string {
@@ -118,45 +128,4 @@ export function statusLine(
     parts.push(session.cacheLeft > 0 ? `缓存 ${Math.ceil(session.cacheLeft / 60_000)}m` : '缓存已过期')
   }
   return parts.join(' · ')
-}
-
-// Two rings per account, side by side: the gauge style's drawing on surfaces with Svg.
-export function gaugeSvg(accounts: readonly CpaAccount[], now: number): { source: string; width: number; height: number } {
-  const ring = 26
-  const stroke = 6
-  const cell = 76
-  const gap = 18
-  const blockWidth = cell * 2
-  const width = Math.max(1, accounts.length * blockWidth + (accounts.length - 1) * gap)
-  const height = 104
-  const circumference = 2 * Math.PI * ring
-  const font = "font-family='Segoe UI, Microsoft YaHei, sans-serif'"
-
-  const blocks = accounts.map((account, i) => {
-    const x0 = i * (blockWidth + gap)
-    const stale = !account.enabled || account.stale
-    const rings = account.windows.slice(0, 2).map((w, j) => {
-      const cx = x0 + j * cell + cell / 2
-      const cy = 52
-      const colour = HEX[tone(w.remaining, stale)] ?? HEX.inactive
-      const share = w.remaining === null ? 0 : Math.max(0, Math.min(100, w.remaining)) / 100
-      const reset = resetIn(w, now)
-      return [
-        `<circle cx='${cx}' cy='${cy}' r='${ring}' fill='none' stroke='rgba(128,128,128,0.22)' stroke-width='${stroke}'/>`,
-        `<circle cx='${cx}' cy='${cy}' r='${ring}' fill='none' stroke='${colour}' stroke-width='${stroke}' stroke-linecap='round'`,
-        ` stroke-dasharray='${(circumference * share).toFixed(2)} ${circumference.toFixed(2)}' transform='rotate(-90 ${cx} ${cy})'/>`,
-        `<text x='${cx}' y='${cy + 5}' text-anchor='middle' font-size='14' font-weight='600' fill='${colour}' ${font}>${percent(w.remaining)}</text>`,
-        `<text x='${cx}' y='${cy + ring + 18}' text-anchor='middle' font-size='11' fill='#9ca3af' ${font}>`,
-        `${w.name}${Number.isFinite(reset) ? ` · ${duration(reset)}` : ''}</text>`,
-      ].join('')
-    })
-    const title = `<text x='${x0 + blockWidth / 2}' y='13' text-anchor='middle' font-size='12' font-weight='600' fill='#9ca3af' ${font}>${account.label}${stale ? (account.enabled ? ' 旧值' : ' 已禁用') : ''}</text>`
-    return title + rings.join('')
-  })
-
-  return {
-    source: `<svg xmlns='http://www.w3.org/2000/svg' width='${width}' height='${height}' viewBox='0 0 ${width} ${height}'>${blocks.join('')}</svg>`,
-    width,
-    height,
-  }
 }

@@ -80,7 +80,7 @@ async function gather($: EngineInterface, surface: RenderSurface): Promise<View>
     cost: usage.cost ? usage.cost.usd * priceMultiplier : null,
     cacheLeft: turn ? cacheTtlMs - (now - turn.endedAt) : null,
     turnMs: turn?.durationMs ?? null,
-    isNarrow: false,
+    columns: 120,
     canFold: true,
   }
 }
@@ -99,7 +99,14 @@ async function updateStatus($: EngineInterface) {
 // Opens or closes the pane to match the placement; the band and status line follow on their own.
 async function applyPlacement($: EngineInterface, placement: Placement) {
   if (placement === 'pane' || placement === 'widget') {
-    await $.ui.open({ id: PANE, title: 'CPA', ...(placement === 'widget' ? { placement: 'widget' as const } : {}) })
+    // The widget asks for the small seat and a small block; where the surface has no widgets
+    // it opens as a pane, and the widget's own compact drawing still tells the two apart.
+    await $.ui.open(
+      placement === 'widget'
+        // Cast: types laid by an engine older than widgets lack `placement`.
+        ? ({ id: PANE, title: 'CPA 额度', placement: 'widget', rows: 8, columns: 32 } as Parameters<EngineInterface['ui']['open']>[0])
+        : { id: PANE, title: 'CPA' },
+    )
   } else {
     await $.ui.close({ id: PANE })
   }
@@ -144,6 +151,16 @@ function help(current: Prefs): string {
   ].join('\n')
 }
 
+function actions($: EngineInterface): Actions {
+  return {
+    refresh: () => void refresh($),
+    toggleFold: () => void update($, isFolded, f => !f),
+    toggleSettings: () => void update($, isSettingsOpen, o => !o),
+    setStyle: value => void (isStyle(value) && setPrefs($, { style: value })),
+    setPlacement: value => void (isPlacement(value) && setPrefs($, { placement: value })),
+  }
+}
+
 function elements($: EngineInterface, e: Parameters<EngineInterface['ui']['resolve']>[0]): Els {
   const table = $.ui.resolve(e)
   return {
@@ -151,7 +168,6 @@ function elements($: EngineInterface, e: Parameters<EngineInterface['ui']['resol
     Text: table.Text,
     Button: table.Button,
     Select: 'Select' in table ? table.Select : undefined,
-    Svg: 'Svg' in table ? table.Svg : undefined,
   }
 }
 
@@ -244,27 +260,18 @@ export const register: Register = (on, options) => {
     if (picked.placement !== 'above') return next(e)
 
     const v = await gather($, e.surface)
-    return render(elements($, e), v, {
-      refresh: () => void refresh($),
-      toggleFold: () => void update($, isFolded, f => !f),
-      toggleSettings: () => void update($, isSettingsOpen, o => !o),
-      setStyle: value => void (isStyle(value) && setPrefs($, { style: value })),
-      setPlacement: value => void (isPlacement(value) && setPrefs($, { placement: value })),
-    } satisfies Actions)
+    return render(elements($, e), { ...v, columns: e.props.bodyColumns }, actions($))
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const v = await gather($, e.surface)
     const els = elements($, e)
     // Compared as a string: an engine older than widgets types the seat without it.
-    if ((e.props.placement as string) === 'widget') return glance(els, v)
-    return render(els, { ...v, isNarrow: e.props.bodyColumns < 90 }, {
-      refresh: () => void refresh($),
-      toggleFold: () => void update($, isFolded, f => !f),
-      toggleSettings: () => void update($, isSettingsOpen, o => !o),
-      setStyle: value => void (isStyle(value) && setPrefs($, { style: value })),
-      setPlacement: value => void (isPlacement(value) && setPrefs($, { placement: value })),
-    } satisfies Actions)
+    const isWidgetSeat = (e.props.placement as string) === 'widget'
+    if (isWidgetSeat || v.prefs.placement === 'widget') {
+      return glance(els, { ...v, columns: e.props.bodyColumns, canFold: false }, actions($), !isWidgetSeat)
+    }
+    return render(els, { ...v, columns: e.props.bodyColumns }, actions($))
   })
 
   // The desktop's right-click menu: switch placement or style from anywhere, so the
