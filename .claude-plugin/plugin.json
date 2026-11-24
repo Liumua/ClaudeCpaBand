@@ -1,12 +1,26 @@
 {
   "name": "cpa-band",
-  "version": "0.1.0",
-  "description": "Band above the prompt: CPA relay quota and usage, plus this session's tokens, cost, cache countdown and model",
+  "version": "0.2.0",
+  "description": "CPA relay quota and usage plus this session's tokens, cost, cache countdown and model, in four styles, above the prompt, in a pane, a widget or the status line",
   "author": { "name": "Liumua" },
   "repository": "https://github.com/Liumua/ClaudeCpaBand",
   "license": "MIT",
   "types": "./types/index.d.ts",
   "userConfig": {
+    "style": {
+      "type": "string",
+      "title": "Style",
+      "description": "classic, compact, card or gauge (ring gauges on the desktop app). The band's Settings button and /cpa-band switch it too.",
+      "options": ["classic", "compact", "card", "gauge"],
+      "default": "classic"
+    },
+    "placement": {
+      "type": "string",
+      "title": "Placement",
+      "description": "above (band over the prompt), pane (side pane), widget (small desktop widget) or status (one line under the prompt).",
+      "options": ["above", "pane", "widget", "status"],
+      "default": "above"
+    },
     "refreshSeconds": {
       "type": "number",
       "title": "CPA refresh interval (seconds)",

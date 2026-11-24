@@ -1,68 +1,29 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderSurface } from 'claude-code'
 
-import type { CpaAccount, CpaSnapshot, CpaTotals, LastTurn } from '../types'
+import type { CpaSnapshot, LastTurn, Placement, Prefs, Style } from '../types'
+import { isPlacement, isStyle, PLACEMENTS, positive, statusLine, STYLES } from './format'
+import { glance, render } from './view'
+import type { Actions, Els, View } from './view'
 
 const cpa = atom({ plugin: 'cpa-band', key: 'cpa' } as const, null)
 const isLoading = atom({ plugin: 'cpa-band', key: 'isLoading' } as const, false)
 const lastTurn = atom({ plugin: 'cpa-band', key: 'lastTurn' } as const, null)
 const isFolded = atom({ plugin: 'cpa-band', key: 'isFolded' } as const, false)
+const isSettingsOpen = atom({ plugin: 'cpa-band', key: 'isSettingsOpen' } as const, false)
+const prefs = atom({ plugin: 'cpa-band', key: 'prefs' } as const, { style: 'classic', placement: 'above' } as Prefs)
 
+const PANE = 'cpa-band'
 const TICK_MS = 15_000
-const BAR_CELLS = 10
 
-const ERRORS: Record<string, string> = {
-  'no-config': '未找到 ~/.cpa/query.json：先运行一次 CPA 查询并保存配置',
-  'bad-config': '~/.cpa/query.json 缺少 base_url、proxy_url 或 api_key',
-  'run-failed': 'PowerShell 查询脚本运行失败',
-  'http-0': '连接失败：检查代理是否开启',
-  'http-401': 'Key 无效或已撤销',
-  'http-404': '入口未配置该接口',
-  'http-429': '查询过于频繁，调大刷新间隔',
-}
+// What the person picked in the band or with /cpa-band, and the /config values it was
+// picked under: once /config changes, its values win again.
+type StoredPrefs = Prefs & { config: Prefs }
 
-function errorText(code: string): string {
-  return ERRORS[code] ?? code.replace(/^http-/, 'HTTP ')
-}
-
-function positive(value: unknown, fallback: number): number {
-  const n = Number(value)
-  return Number.isFinite(n) && n > 0 ? n : fallback
-}
-
-function compact(n: number | null | undefined): string {
-  if (n === null || n === undefined) return '?'
-  if (n >= 1e9) return `${(n / 1e9).toFixed(2)}B`
-  if (n >= 1e6) return `${(n / 1e6).toFixed(2)}M`
-  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`
-  return String(Math.round(n))
-}
-
-function usd(t: CpaTotals): string {
-  if (t.cost === null) return '?'
-  return `${t.partial ? '*' : ''}${t.approx ? '~' : ''}$${t.cost.toFixed(2)}`
-}
-
-function duration(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000))
-  if (s >= 86_400) return `${Math.floor(s / 86_400)}d${Math.floor((s % 86_400) / 3600)}h`
-  if (s >= 3600) return `${Math.floor(s / 3600)}h${Math.floor((s % 3600) / 60)}m`
-  if (s >= 60) return `${Math.floor(s / 60)}m`
-  return `${s}s`
-}
-
-function tone(remaining: number | null, isStale: boolean): string {
-  if (isStale || remaining === null) return 'inactive'
-  if (remaining > 50) return 'success'
-  if (remaining > 20) return 'warning'
-  return 'error'
-}
-
-function bar(remaining: number | null): string {
-  const filled = remaining === null ? 0 : Math.round((BAR_CELLS * remaining) / 100)
-  return '█'.repeat(filled) + '░'.repeat(BAR_CELLS - filled)
-}
-
+// Set by register from its options; read by the functions below.
+let cacheTtlMs = 60 * 60_000
+let priceMultiplier = 1
+let configPrefs: Prefs = { style: 'classic', placement: 'above' }
 let isRunning = false
 
 // Runs scripts/fetch.ps1 and stores what it printed; one run at a time.
@@ -93,19 +54,124 @@ async function refresh($: EngineInterface) {
   }
   await update($, cpa, () => snapshot)
   await update($, isLoading, () => false)
+  await updateStatus($)
+}
+
+// Everything a drawing shows, read at one moment.
+async function gather($: EngineInterface, surface: RenderSurface): Promise<View> {
+  const [snapshot, loading, turn, folded, settingsOpen, picked, usage, now] = await Promise.all([
+    read($, cpa), read($, isLoading), read($, lastTurn), read($, isFolded), read($, isSettingsOpen),
+    read($, prefs), $.session.usage(), $.clock.now(),
+  ])
+  return {
+    surface,
+    snapshot,
+    isLoading: loading,
+    isFolded: folded,
+    isSettingsOpen: settingsOpen,
+    prefs: picked,
+    now,
+    model: turn?.model ?? (await $.session.model()),
+    ctx: usage.context,
+    cost: usage.cost ? usage.cost.usd * priceMultiplier : null,
+    cacheLeft: turn ? cacheTtlMs - (now - turn.endedAt) : null,
+    turnMs: turn?.durationMs ?? null,
+    isNarrow: false,
+    canFold: true,
+  }
+}
+
+// Keeps the status line in step while it is the chosen place; clears it otherwise.
+async function updateStatus($: EngineInterface) {
+  const picked = await read($, prefs)
+  if (picked.placement !== 'status') {
+    $.ui.status(undefined)
+    return
+  }
+  const v = await gather($, 'terminal')
+  $.ui.status(statusLine(v.snapshot, { model: v.model, ctxPercent: v.ctx.percent, cost: v.cost, cacheLeft: v.cacheLeft }))
+}
+
+// Opens or closes the pane to match the placement; the band and status line follow on their own.
+async function applyPlacement($: EngineInterface, placement: Placement) {
+  if (placement === 'pane' || placement === 'widget') {
+    await $.ui.open({ id: PANE, title: 'CPA', ...(placement === 'widget' ? { placement: 'widget' as const } : {}) })
+  } else {
+    await $.ui.close({ id: PANE })
+  }
+  await updateStatus($)
+}
+
+async function setPrefs($: EngineInterface, change: Partial<Prefs>) {
+  const before = await read($, prefs)
+  const after: Prefs = { ...before, ...change }
+  await update($, prefs, () => after)
+  const stored: StoredPrefs = { ...after, config: configPrefs }
+  await $.store.set('prefs', stored)
+  if (after.placement !== before.placement) await applyPlacement($, after.placement)
+  $.ui.invalidate('ui.render')
+}
+
+// The picks saved earlier, unless /config has changed since they were made.
+async function loadPrefs($: EngineInterface): Promise<Prefs> {
+  const saved = (await $.store.get('prefs')) as Partial<StoredPrefs> | undefined
+  const sameConfig =
+    saved?.config?.style === configPrefs.style && saved.config.placement === configPrefs.placement
+  if (sameConfig && isStyle(saved.style) && isPlacement(saved.placement)) {
+    return { style: saved.style, placement: saved.placement }
+  }
+  return configPrefs
+}
+
+// A value or label from STYLES / PLACEMENTS, as typed after /cpa-band.
+function pick<T extends string>(list: readonly { value: T; label: string }[], word: string): T | undefined {
+  return list.find(item => item.value === word || item.label === word)?.value
+}
+
+function help(current: Prefs): string {
+  const styles = STYLES.map(s => `${s.value}(${s.label})`).join(' ')
+  const places = PLACEMENTS.map(p => `${p.value}(${p.label})`).join(' ')
+  return [
+    `当前：样式 ${current.style}，位置 ${current.placement}`,
+    `/cpa-band style <样式>   ${styles}`,
+    `/cpa-band place <位置>   ${places}`,
+    '/cpa-band refresh       立即刷新 CPA 数据',
+  ].join('\n')
+}
+
+function elements($: EngineInterface, e: Parameters<EngineInterface['ui']['resolve']>[0]): Els {
+  const table = $.ui.resolve(e)
+  return {
+    Box: table.Box,
+    Text: table.Text,
+    Button: table.Button,
+    Select: 'Select' in table ? table.Select : undefined,
+    Svg: 'Svg' in table ? table.Svg : undefined,
+  }
 }
 
 export const register: Register = (on, options) => {
   const refreshMs = positive(options.refreshSeconds, 120) * 1000
-  const cacheTtlMs = positive(options.cacheTtlMinutes, 60) * 60_000
-  const priceMultiplier = positive(options.priceMultiplier, 1)
+  cacheTtlMs = positive(options.cacheTtlMinutes, 60) * 60_000
+  priceMultiplier = positive(options.priceMultiplier, 1)
+  configPrefs = {
+    style: isStyle(options.style) ? (options.style as Style) : 'classic',
+    placement: isPlacement(options.placement) ? (options.placement as Placement) : 'above',
+  }
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     if (e.isInteractive) {
+      await $.command.register({ name: 'cpa-band', description: '切换 CPA 横条的样式和位置' })
+      const picked = await loadPrefs($)
+      await update($, prefs, () => picked)
+      await applyPlacement($, picked.placement)
       void refresh($)
       $.clock.every(refreshMs, () => void refresh($))
-      $.clock.every(TICK_MS, () => $.ui.invalidate('ui.render'))
+      $.clock.every(TICK_MS, () => {
+        $.ui.invalidate('ui.render')
+        void updateStatus($)
+      })
     }
     return started
   })
@@ -117,134 +183,58 @@ export const register: Register = (on, options) => {
       const model = e.usage?.model ?? (await $.session.model())
       const turn: LastTurn = { endedAt, model, durationMs: e.durationMs }
       await update($, lastTurn, () => turn)
+      await updateStatus($)
     }
     return result
   })
 
+  on('command.run', { command: 'cpa-band' }, async ($, e) => {
+    const [verb = '', word = ''] = e.args.trim().split(/\s+/)
+    if (verb === 'style' || verb === '样式') {
+      const style = pick(STYLES, word)
+      if (!style) return { text: `没有这个样式：${word}\n${help(await read($, prefs))}` }
+      await setPrefs($, { style })
+      return { text: `CPA 横条样式已切换为 ${style}` }
+    }
+    if (verb === 'place' || verb === '位置') {
+      const placement = pick(PLACEMENTS, word)
+      if (!placement) return { text: `没有这个位置：${word}\n${help(await read($, prefs))}` }
+      await setPrefs($, { placement })
+      return { text: `CPA 横条已移到 ${placement}` }
+    }
+    if (verb === 'refresh' || verb === '刷新') {
+      await refresh($)
+      return { text: 'CPA 数据已刷新' }
+    }
+    return { text: help(await read($, prefs)) }
+  })
+
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
+    const picked = await read($, prefs)
+    if (picked.placement !== 'above') return next(e)
 
-    const { Box, Button, Text } = $.ui.resolve(e)
-    const [snapshot, loading, turn, folded, usage, now] = await Promise.all([
-      read($, cpa), read($, isLoading), read($, lastTurn), read($, isFolded),
-      $.session.usage(), $.clock.now(),
-    ])
-    const model = turn?.model ?? (await $.session.model())
+    const v = await gather($, e.surface)
+    return render(elements($, e), v, {
+      refresh: () => void refresh($),
+      toggleFold: () => void update($, isFolded, f => !f),
+      toggleSettings: () => void update($, isSettingsOpen, o => !o),
+      setStyle: value => void (isStyle(value) && setPrefs($, { style: value })),
+      setPlacement: value => void (isPlacement(value) && setPrefs($, { placement: value })),
+    } satisfies Actions)
+  })
 
-    const percent = (remaining: number | null) => (remaining === null ? '?' : `${remaining.toFixed(0)}%`)
-
-    // Folded: each account's windows as bare percentages, on the session row.
-    const quotaInline = (accounts: CpaAccount[]) =>
-      accounts.map(account => (
-        <Text key={account.label}>
-          <Text dimColor>{account.label} </Text>
-          {account.windows.map((w, i) => (
-            <Text key={w.name} color={tone(w.remaining, !account.enabled || account.stale)}>
-              {i > 0 ? '/' : ''}{percent(w.remaining)}
-            </Text>
-          ))}
-          {'  '}
-        </Text>
-      ))
-
-    // Unfolded: one row per account, its windows side by side in fixed-width cells.
-    const accountRows = (accounts: CpaAccount[]) =>
-      accounts.map(account => {
-        const stale = !account.enabled || account.stale
-        return (
-          <Box key={account.label} flexDirection="row">
-            <Box width={5}>
-              <Text bold>{account.label}</Text>
-            </Box>
-            {account.windows.map(w => {
-              const reset = w.resetsAt && w.remaining !== 100 ? Date.parse(w.resetsAt) - now : NaN
-              return (
-                <Box key={w.name} width={34}>
-                  <Text>
-                    <Text dimColor>{w.name} </Text>
-                    <Text color={tone(w.remaining, stale)} tabular>
-                      {bar(w.remaining)} {percent(w.remaining).padStart(4)}
-                    </Text>
-                    {Number.isFinite(reset) ? <Text dimColor> {duration(reset)}后重置</Text> : ''}
-                  </Text>
-                </Box>
-              )
-            })}
-            {stale ? <Text dimColor>{account.enabled ? '旧值' : '已禁用'}</Text> : ''}
-          </Box>
-        )
-      })
-
-    const cpaRows = () => {
-      if (!snapshot) {
-        return <Text dimColor>CPA 查询中…</Text>
-      }
-      if (snapshot.error) {
-        return <Text color="error">CPA：{errorText(snapshot.error)}</Text>
-      }
-      const windows = snapshot.usage?.windows ?? []
-      const hour = windows.find(w => w.period === '1h')
-      const week = windows.find(w => w.period === '7d')
-      return (
-        <Box flexDirection="column">
-          <Box flexDirection="row" flexWrap="wrap">
-            <Text color="claude" bold>CPA  </Text>
-            {snapshot.usageError ? (
-              <Text color="error">用量：{errorText(snapshot.usageError)}  </Text>
-            ) : (
-              <Text>
-                {hour ? <Text>1h {hour.requests ?? '?'}次 {compact(hour.tokens)} <Text color="warning">{usd(hour)}</Text>   </Text> : ''}
-                {week ? <Text>7d <Text color="warning">{usd(week)}</Text> 缓存 {week.cachePct === null ? '?' : `${week.cachePct.toFixed(1)}%`}   </Text> : ''}
-              </Text>
-            )}
-            <Text dimColor>{loading ? '刷新中…' : `${duration(now - snapshot.fetchedAt)}前更新`}</Text>
-          </Box>
-          {snapshot.quotaError ? (
-            <Text color="error">额度：{errorText(snapshot.quotaError)}</Text>
-          ) : (
-            accountRows(snapshot.quota?.accounts ?? [])
-          )}
-        </Box>
-      )
-    }
-
-    const ctx = usage.context
-    const cost = usage.cost ? usage.cost.usd * priceMultiplier : null
-    const cacheLeft = turn ? cacheTtlMs - (now - turn.endedAt) : null
-
-    const sessionRow = (
-      <Box flexDirection="row" flexWrap="wrap">
-        <Text color="claude" bold>会话  </Text>
-        <Text>{model}  </Text>
-        <Text>
-          上下文 {compact(ctx.tokens)}/{compact(ctx.window)}
-          {ctx.percent === undefined ? '' : ` (${ctx.percent}%)`}{'  '}
-        </Text>
-        {cost === null ? '' : <Text color="warning">≈${cost.toFixed(4)}  </Text>}
-        {cacheLeft === null ? (
-          ''
-        ) : cacheLeft > 0 ? (
-          <Text color="success">缓存 {Math.ceil(cacheLeft / 60_000)}m 内有效  </Text>
-        ) : (
-          <Text color="inactive">缓存已过期  </Text>
-        )}
-        {turn ? <Text dimColor>上轮 {duration(turn.durationMs)}  </Text> : ''}
-        {folded && snapshot?.quota ? quotaInline(snapshot.quota.accounts) : ''}
-        <Button key="refresh" label="刷新" dimColor onPress={() => refresh($)} />
-        <Button
-          key="fold"
-          label={folded ? '展开' : '收起'}
-          dimColor
-          onPress={() => update($, isFolded, v => !v)}
-        />
-      </Box>
-    )
-
-    return (
-      <Box flexDirection="column">
-        {folded ? '' : cpaRows()}
-        {sessionRow}
-      </Box>
-    )
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const v = await gather($, e.surface)
+    const els = elements($, e)
+    // Compared as a string: an engine older than widgets types the seat without it.
+    if ((e.props.placement as string) === 'widget') return glance(els, v)
+    return render(els, { ...v, isNarrow: e.props.bodyColumns < 90 }, {
+      refresh: () => void refresh($),
+      toggleFold: () => void update($, isFolded, f => !f),
+      toggleSettings: () => void update($, isSettingsOpen, o => !o),
+      setStyle: value => void (isStyle(value) && setPrefs($, { style: value })),
+      setPlacement: value => void (isPlacement(value) && setPrefs($, { placement: value })),
+    } satisfies Actions)
   })
 }

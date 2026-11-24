@@ -26,6 +26,11 @@ export type CpaSnapshot = {
 // The main thread's last finished turn: when it ended, the model, how long it took.
 export type LastTurn = { endedAt: number; model: string; durationMs: number }
 
+// How the band looks, and where it is drawn.
+export type Style = 'classic' | 'compact' | 'card' | 'gauge'
+export type Placement = 'above' | 'pane' | 'widget' | 'status'
+export type Prefs = { style: Style; placement: Placement }
+
 declare module 'claude-code' {
   interface PluginState {
     'cpa-band': {
@@ -33,6 +38,8 @@ declare module 'claude-code' {
       isLoading: boolean
       lastTurn: LastTurn | null
       isFolded: boolean
+      isSettingsOpen: boolean
+      prefs: Prefs
     }
   }
 }
