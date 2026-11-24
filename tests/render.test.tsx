@@ -37,6 +37,14 @@ const SNAPSHOT: CpaSnapshot = {
   quotaError: null,
 }
 
+// What a drawing says: its Text, or on surfaces that take Svg, a drawing's description.
+type Mounted = { find: (q: { type?: string; text?: string | RegExp }) => Promise<{ props: Record<string, unknown>; text: string } | undefined> }
+async function shows(ui: Mounted, pattern: RegExp): Promise<boolean> {
+  if (await ui.find({ type: 'Text', text: pattern })) return true
+  const drawing = await ui.find({ type: 'Svg' })
+  return pattern.test(String(drawing?.props.alt ?? ''))
+}
+
 const SURFACES = ['terminal', 'desktop'] as const
 const STYLES = ['classic', 'compact', 'card', 'gauge'] as const
 
@@ -93,8 +101,7 @@ for (const style of STYLES) {
     for (const surface of SURFACES) {
       const ui = await $.ui.mount({ ...BAND, surface })
       // The gauge's rings are an Svg on the desktop; its text rows still name the session.
-      const found = await ui.find({ type: 'Text', text: /claude-opus-5-5/ })
-      expect(found).toBeTruthy()
+      expect(`${surface}:${await shows(ui, /claude-opus-5-5|A01/)}`).toBe(`${surface}:true`)
       await ui.unmount()
     }
   })
@@ -103,7 +110,7 @@ for (const style of STYLES) {
     seed(on, { style, placement: 'pane' })
     for (const surface of SURFACES) {
       const ui = await $.ui.mount({ ...PANE, surface })
-      expect(await ui.find({ type: 'Text', text: /claude-opus-5-5|A01/ })).toBeTruthy()
+      expect(`${surface}:${await shows(ui, /claude-opus-5-5|A01/)}`).toBe(`${surface}:true`)
       await ui.unmount()
     }
   })
@@ -123,7 +130,7 @@ test('the band stays out of the way when placed elsewhere', async ($, on) => {
 test('the widget shows the percentages', async ($, on) => {
   seed(on, { style: 'classic', placement: 'widget' })
   const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, placement: 'widget' as 'dock' }, surface: 'desktop' })
-  expect(await ui.find({ type: 'Text', text: /A01/ })).toBeTruthy()
+  expect(await shows(ui, /A01/)).toBe(true)
   await ui.unmount()
 })
 
@@ -142,8 +149,8 @@ test('gauge: the dashboard leads with stat tiles', async ($, on) => {
   seed(on, { style: 'gauge', placement: 'above' })
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...BAND, surface })
-    expect(await ui.find({ type: 'Text', text: '近 1 小时' })).toBeTruthy()
-    expect(await ui.find({ type: 'Text', text: '账号额度' })).toBeTruthy()
+    expect(await shows(ui, /近 1 小时/)).toBe(true)
+    expect(await shows(ui, /A01/)).toBe(true)
     await ui.unmount()
   }
 })
@@ -154,7 +161,7 @@ for (const bodyColumns of [40, 70, 140]) {
       seed(on, { style, placement: 'pane' })
       for (const surface of SURFACES) {
         const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns }, surface })
-        expect(await ui.find({ type: 'Text', text: /A01/ })).toBeTruthy()
+        expect(await shows(ui, /A01/)).toBe(true)
         await ui.unmount()
       }
     })

@@ -2,19 +2,22 @@
 // presses go through `Actions`. Every layout reads `columns` and has a wide, a mid and
 // a narrow form, so the band, a docked pane and a small seat each get one that fits.
 import type {
-  BoxProps, ButtonProps, ElementConstructor, RenderChildren, RenderSurface, SelectProps, TextProps,
+  BoxProps, ButtonProps, ElementConstructor, RenderChildren, RenderSurface, SelectProps, SvgProps, TextProps,
 } from 'claude-code'
 
 import type { CpaAccount, CpaSnapshot, CpaWindow, Prefs } from '../types'
 import {
   compact, duration, errorText, percent, period, PLACEMENTS, resetIn, severity, STYLES, textBar, usd,
 } from './format'
+import { capsuleSvg, cardsSvg, dashboardSvg, glanceSvg } from './svg'
+import type { Drawing, Metric, Panel } from './svg'
 
 export type Els = {
   Box: ElementConstructor<BoxProps>
   Text: ElementConstructor<TextProps>
   Button: ElementConstructor<ButtonProps>
   Select?: ElementConstructor<SelectProps>
+  Svg?: ElementConstructor<SvgProps>
 }
 
 export type View = {
@@ -74,16 +77,79 @@ function updated(v: View): string {
 // A level bar: Boxes the surface paints, fill and a lighter track of the same hue;
 // block characters on the terminal.
 function meter(els: Els, v: View, remaining: number | null, stale: boolean, cells: number) {
-  const { Box, Text } = els
+  const { Box, Svg, Text } = els
   const sev = severity(remaining, stale)
   if (v.surface === 'terminal') {
     return <Text color={sev.term}>{textBar(remaining, cells)}</Text>
   }
+  if (Svg) return drawing(Svg, capsuleSvg(remaining, stale, cells * PX_PER_CELL))
   const share = remaining === null ? 0 : Math.max(0, Math.min(100, remaining)) / 100
   const filled = Math.round(cells * share)
   return (
     <Box flexDirection="row" width={cells} height={1} backgroundColor={sev.track}>
       {filled > 0 ? <Box width={filled} height={1} backgroundColor={sev.fill} /> : ''}
+    </Box>
+  )
+}
+
+// Pixels a cell stands for where a drawing is sized from the site's columns.
+const PX_PER_CELL = 8
+
+function drawing(Svg: ElementConstructor<SvgProps>, d: Drawing) {
+  return <Svg source={d.source} width={d.width} height={d.height} alt={d.alt} />
+}
+
+// The width a full-width drawing takes: the site's columns in pixels, within reason.
+function pixels(v: View): number {
+  return Math.max(240, Math.min(1200, v.columns * PX_PER_CELL))
+}
+
+// A cost as a drawing shows it: ≈ where it is an estimate, the partial note goes under it.
+function money(t: { cost: number | null; approx: boolean }): string {
+  return t.cost === null ? '?' : `${t.approx ? '≈' : ''}$${t.cost.toFixed(2)}`
+}
+
+// The plain model the SVG drawings take.
+function panelOf(v: View): Panel {
+  const s = v.snapshot
+  const hour = s ? period(s, '1h') : undefined
+  const week = s ? period(s, '7d') : undefined
+  const metrics: Metric[] = []
+  if (s && !s.error && !s.usageError) {
+    if (hour) metrics.push({ label: '近 1 小时', value: money(hour), sub: [`${hour.requests ?? '?'} 次 · ${compact(hour.tokens)}`, hour.partial ? '部分计价' : ''].filter(Boolean).join(' · ') })
+    if (week) metrics.push({ label: '近 7 天', value: money(week), sub: `缓存命中 ${week.cachePct === null ? '?' : `${week.cachePct.toFixed(1)}%`}` })
+  }
+  metrics.push({ label: '上下文', value: v.ctx.percent === undefined ? '?' : `${v.ctx.percent}%`, sub: `${compact(v.ctx.tokens)} / ${compact(v.ctx.window)}` })
+  metrics.push({ label: v.model, value: v.cost === null ? '—' : `≈$${v.cost.toFixed(2)}`, sub: cacheText(v)?.text })
+  const notice = !s ? 'CPA 查询中…' : s.error ? errorText(s.error) : s.quotaError ? errorText(s.quotaError) : s.usageError ? `用量：${errorText(s.usageError)}` : undefined
+  return { metrics, accounts: accountsOf(v), notice, now: v.now }
+}
+
+function sessionMetrics(v: View): Metric[] {
+  const cache = cacheText(v)
+  return [
+    { label: '模型', value: v.model },
+    { label: '上下文', value: `${v.ctx.percent ?? '?'}% · ${compact(v.ctx.tokens)}` },
+    { label: '本会话', value: v.cost === null ? '—' : `≈$${v.cost.toFixed(4)}` },
+    ...(cache ? [{ label: '缓存', value: cache.text.replace(/^缓存 /, '') }] : []),
+    ...(v.turnMs === null ? [] : [{ label: '上轮耗时', value: duration(v.turnMs) }]),
+  ]
+}
+
+// A header row: the title and when it was read on the left, the controls on the right.
+function header(els: Els, v: View, a: Actions) {
+  const { Box, Button, Text } = els
+  return (
+    <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+      <Text>
+        <Text weight="semibold">CPA 额度</Text>
+        <Text dimColor size="caption">  {updated(v)}</Text>
+      </Text>
+      <Box flexDirection="row" gap={1}>
+        <Button key="refresh" label="刷新" dimColor onPress={a.refresh} />
+        {v.canFold ? <Button key="fold" label={v.isFolded ? '展开' : '收起'} dimColor onPress={a.toggleFold} /> : ''}
+        <Button key="settings" label={v.isSettingsOpen ? '完成' : '设置'} dimColor onPress={a.toggleSettings} />
+      </Box>
     </Box>
   )
 }
@@ -312,7 +378,16 @@ function card(els: Els, key: string, title: string, children: RenderChildren[], 
 // 卡片: one framed card per account, one for usage, one for the session; side by side
 // where wide, two up in the middle, stacked when narrow.
 function cards(els: Els, v: View, a: Actions) {
-  const { Box, Text } = els
+  const { Box, Svg, Text } = els
+  if (Svg) {
+    const panel = panelOf(v)
+    return (
+      <Box flexDirection="column" gap={1}>
+        {header(els, v, a)}
+        {drawing(Svg, cardsSvg({ ...panel, metrics: panel.metrics.slice(0, 2) }, sessionMetrics(v), pixels(v)))}
+      </Box>
+    )
+  }
   const s = v.snapshot
   const w = width(v)
   const cells = w === 'narrow' ? 10 : 12
@@ -359,7 +434,15 @@ function cards(els: Els, v: View, a: Actions) {
 // 仪表盘: a row of stat tiles over a full-width meter list. Wide, the list and the tiles
 // sit side by side; mid, tiles two up above the list; narrow, all stacked.
 function dashboard(els: Els, v: View, a: Actions) {
-  const { Box } = els
+  const { Box, Svg } = els
+  if (Svg) {
+    return (
+      <Box flexDirection="column" gap={1}>
+        {header(els, v, a)}
+        {drawing(Svg, dashboardSvg(panelOf(v), pixels(v)))}
+      </Box>
+    )
+  }
   const w = width(v)
   const problem = cpaProblem(els, v)
   const quota = card(els, 'quota', '账号额度', [problem ?? meterList(els, v, w === 'wide' ? 14 : w === 'mid' ? 16 : 10)], 1)
@@ -389,10 +472,19 @@ function dashboard(els: Els, v: View, a: Actions) {
 // The small seat: a meter list at a glance and the cache; one press back to the full pane
 // where the seat takes presses.
 export function glance(els: Els, v: View, a: Actions, canPress: boolean) {
-  const { Box, Button, Text } = els
+  const { Box, Button, Svg, Text } = els
   const s = v.snapshot
   const hour = s ? period(s, '1h') : undefined
   const cache = cacheText(v)
+  if (Svg) {
+    const footer = [hour && !s?.usageError ? `1h ${money(hour)}` : '', cache?.text ?? ''].filter(Boolean).join('  ·  ')
+    return (
+      <Box flexDirection="column" gap={1}>
+        {drawing(Svg, glanceSvg(panelOf(v), Math.max(220, Math.min(360, pixels(v))), footer))}
+        {canPress ? <Button key="expand" label="展开为面板" dimColor onPress={() => a.setPlacement('pane')} /> : ''}
+      </Box>
+    )
+  }
   return (
     <Box flexDirection="column">
       {cpaProblem(els, v) ?? ''}

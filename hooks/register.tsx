@@ -29,6 +29,10 @@ let isRunning = false
 // This copy of the module has started its command and timers. A reload starts the
 // module over without always raising session.start again, so later events start it too.
 let isStarted = false
+// The columns the band and the pane last reported, written to the store when they change:
+// what a drawing's pixel width is reckoned from.
+const seenColumns: Record<string, number> = {}
+let savedColumns = ''
 
 // Runs scripts/fetch.ps1 and stores what it printed; one run at a time.
 async function refresh($: EngineInterface) {
@@ -168,6 +172,8 @@ function elements($: EngineInterface, e: Parameters<EngineInterface['ui']['resol
     Text: table.Text,
     Button: table.Button,
     Select: 'Select' in table ? table.Select : undefined,
+    // By surface: the terminal's table answers Svg too, but draws only its alt text.
+    Svg: e.surface !== 'terminal' && 'Svg' in table ? table.Svg : undefined,
   }
 }
 
@@ -197,6 +203,11 @@ async function ensureStarted($: EngineInterface, isSessionStart: boolean) {
   $.clock.every(TICK_MS, () => {
     $.ui.invalidate('ui.render')
     void updateStatus($)
+    const columns = JSON.stringify(seenColumns)
+    if (columns !== savedColumns) {
+      savedColumns = columns
+      void $.store.set('columns', seenColumns).catch(() => undefined)
+    }
   })
 }
 
@@ -260,6 +271,7 @@ export const register: Register = (on, options) => {
     if (picked.placement !== 'above') return next(e)
 
     const v = await gather($, e.surface)
+    seenColumns[`above-${e.surface}`] = e.props.bodyColumns
     return render(elements($, e), { ...v, columns: e.props.bodyColumns }, actions($))
   })
 
@@ -268,6 +280,7 @@ export const register: Register = (on, options) => {
     const els = elements($, e)
     // Compared as a string: an engine older than widgets types the seat without it.
     const isWidgetSeat = (e.props.placement as string) === 'widget'
+    seenColumns[`pane-${e.props.placement}-${e.surface}`] = e.props.bodyColumns
     if (isWidgetSeat || v.prefs.placement === 'widget') {
       return glance(els, { ...v, columns: e.props.bodyColumns, canFold: false }, actions($), !isWidgetSeat)
     }
