@@ -24,7 +24,11 @@ type StoredPrefs = Prefs & { config: Prefs }
 let cacheTtlMs = 60 * 60_000
 let priceMultiplier = 1
 let configPrefs: Prefs = { style: 'classic', placement: 'above' }
+let refreshMs = 120_000
 let isRunning = false
+// This copy of the module has started its command and timers. A reload starts the
+// module over without always raising session.start again, so later events start it too.
+let isStarted = false
 
 // Runs scripts/fetch.ps1 and stores what it printed; one run at a time.
 async function refresh($: EngineInterface) {
@@ -106,10 +110,11 @@ async function setPrefs($: EngineInterface, change: Partial<Prefs>) {
   const before = await read($, prefs)
   const after: Prefs = { ...before, ...change }
   await update($, prefs, () => after)
-  const stored: StoredPrefs = { ...after, config: configPrefs }
-  await $.store.set('prefs', stored)
   if (after.placement !== before.placement) await applyPlacement($, after.placement)
   $.ui.invalidate('ui.render')
+  // Kept for new sessions; a failed write still leaves this session switched.
+  const stored: StoredPrefs = { ...after, config: configPrefs }
+  await $.store.set('prefs', stored).catch(() => undefined)
 }
 
 // The picks saved earlier, unless /config has changed since they were made.
@@ -150,8 +155,37 @@ function elements($: EngineInterface, e: Parameters<EngineInterface['ui']['resol
   }
 }
 
+// Registers /cpa-band, starts the timers and seats the band; once per copy of the module.
+// At a session's start it takes the saved picks; after a reload it keeps the session's.
+async function ensureStarted($: EngineInterface, isSessionStart: boolean) {
+  if (isStarted) return
+  isStarted = true
+  let commandError: string | null = null
+  try {
+    await $.command.register({
+      name: 'cpa-band',
+      description: '切换 CPA 横条的样式和位置',
+      argumentHint: 'style <样式> | place <位置> | refresh',
+    })
+  } catch (err) {
+    commandError = String(err)
+  }
+  await $.store.set('lastStart', { at: await $.clock.now(), isSessionStart, commandError }).catch(() => undefined)
+  if (isSessionStart) {
+    const picked = await loadPrefs($)
+    await update($, prefs, () => picked)
+  }
+  await applyPlacement($, (await read($, prefs)).placement).catch(() => undefined)
+  void refresh($)
+  $.clock.every(refreshMs, () => void refresh($))
+  $.clock.every(TICK_MS, () => {
+    $.ui.invalidate('ui.render')
+    void updateStatus($)
+  })
+}
+
 export const register: Register = (on, options) => {
-  const refreshMs = positive(options.refreshSeconds, 120) * 1000
+  refreshMs = positive(options.refreshSeconds, 120) * 1000
   cacheTtlMs = positive(options.cacheTtlMinutes, 60) * 60_000
   priceMultiplier = positive(options.priceMultiplier, 1)
   configPrefs = {
@@ -161,19 +195,13 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    if (e.isInteractive) {
-      await $.command.register({ name: 'cpa-band', description: '切换 CPA 横条的样式和位置' })
-      const picked = await loadPrefs($)
-      await update($, prefs, () => picked)
-      await applyPlacement($, picked.placement)
-      void refresh($)
-      $.clock.every(refreshMs, () => void refresh($))
-      $.clock.every(TICK_MS, () => {
-        $.ui.invalidate('ui.render')
-        void updateStatus($)
-      })
-    }
+    if (e.isInteractive || e.surface !== null) await ensureStarted($, true)
     return started
+  })
+
+  on('prompt.submit', async ($, e, next) => {
+    await ensureStarted($, false)
+    return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
@@ -183,6 +211,7 @@ export const register: Register = (on, options) => {
       const model = e.usage?.model ?? (await $.session.model())
       const turn: LastTurn = { endedAt, model, durationMs: e.durationMs }
       await update($, lastTurn, () => turn)
+      await ensureStarted($, false)
       await updateStatus($)
     }
     return result
@@ -236,5 +265,25 @@ export const register: Register = (on, options) => {
       setStyle: value => void (isStyle(value) && setPrefs($, { style: value })),
       setPlacement: value => void (isPlacement(value) && setPrefs($, { placement: value })),
     } satisfies Actions)
+  })
+
+  // The desktop's right-click menu: switch placement or style from anywhere, so the
+  // status line (which has no buttons) is never a dead end.
+  // A RegExp matcher: an engine that predates the menu never raises it, and its types lack the name.
+  on('ui.render', { component: /^ContextMenu$/ }, async ($, e) => {
+    const { Box, Button, Text } = $.ui.resolve(e)
+    const current = await read($, prefs)
+    const placeRows = PLACEMENTS.filter(p => p.value !== current.placement).map(p => (
+      <Button key={`cpa-place-${p.value}`} onPress={() => void setPrefs($, { placement: p.value })}>
+        CPA 横条移到{p.label}
+        <Text dimColor>当前：{PLACEMENTS.find(x => x.value === current.placement)?.label}</Text>
+      </Button>
+    ))
+    const styleRows = STYLES.filter(st => st.value !== current.style).map(st => (
+      <Button key={`cpa-style-${st.value}`} onPress={() => void setPrefs($, { style: st.value })}>
+        CPA 横条样式：{st.label}
+      </Button>
+    ))
+    return <Box>{[...placeRows, ...styleRows]}</Box>
   })
 }

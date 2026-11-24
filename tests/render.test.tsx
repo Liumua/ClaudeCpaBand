@@ -144,3 +144,18 @@ test('gauge: the desktop draws the rings as an Svg', async ($, on) => {
   expect(await ui.find({ type: 'Svg' })).toBeTruthy()
   await ui.unmount()
 })
+
+test('the desktop right-click menu offers every other placement and style', async ($, on) => {
+  seed(on, { style: 'gauge', placement: 'status' })
+  const ui = await $.ui.mount({
+    plugin: 'cpa-band',
+    component: 'ContextMenu',
+    requestId: 'menu',
+    props: {},
+    surface: 'desktop',
+  } as never)
+  expect(await ui.find({ type: 'Button', key: 'cpa-place-above' })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', key: 'cpa-place-status' })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', key: 'cpa-style-card' })).toBeTruthy()
+  await ui.unmount()
+})
